@@ -1,0 +1,40 @@
+[Unit]
+Description=age-plugin-yubikey-agent PIN-caching daemon
+Documentation=https://github.com/brongan/age-plugin-yubikey-agent
+Requires=age-plugin-yubikey-agent.socket
+
+[Service]
+ExecStart=/usr/bin/age-plugin-yubikey-agent
+
+# Restart on failure (e.g. YubiKey removed), but not too aggressively.
+Restart=on-failure
+RestartSec=5s
+# Stop cleanly so the PCSC session is released without resetting the YubiKey.
+KillSignal=SIGTERM
+TimeoutStopSec=5s
+
+# The socket unit's DirectoryMode= creates and owns the per-user runtime
+# directory for the socket; the daemon does not need its own RuntimeDirectory.
+
+# Hardening, modeled on FiloSottile/yubikey-agent. The daemon only ever
+# talks to pcscd and its own Unix socket — no network, no kernel keyring,
+# no exotic syscalls — so we lean on syscall/address-family filtering
+# rather than mount-namespace path blocking (which interacts badly with
+# %t/$XDG_RUNTIME_DIR).
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+NoNewPrivileges=yes
+KeyringMode=private
+UMask=0177
+
+[Install]
+WantedBy=default.target
+
