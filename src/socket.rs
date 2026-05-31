@@ -10,11 +10,11 @@ use log::info;
 use tokio::net::UnixListener;
 use xdg::BaseDirectories;
 
-static XDG_PREFIX: &str = "com.brongan.age-plugin-yubikey-agent";
+static XDG_PREFIX: &str = "com.brongan.age-plugin-yubikey-daemon";
 static FILENAME: &str = "daemon.sock";
 
 /// Creates the socket directory and returns the path at
-/// `$XDG_RUNTIME_DIR/com.brongan.age-plugin-yubikey-agent/daemon.sock`.
+/// `$XDG_RUNTIME_DIR/com.brongan.age-plugin-yubikey-daemon/daemon.sock`.
 pub fn create() -> io::Result<PathBuf> {
     BaseDirectories::with_prefix(XDG_PREFIX).place_runtime_file(FILENAME)
 }

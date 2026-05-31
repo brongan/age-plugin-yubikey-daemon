@@ -1,0 +1,11 @@
+[Unit]
+Description=age-plugin-yubikey-daemon socket
+
+[Socket]
+ListenStream=%t/com.brongan.age-plugin-yubikey-daemon/daemon.sock
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target
+

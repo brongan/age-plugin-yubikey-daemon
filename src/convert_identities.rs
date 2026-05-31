@@ -4,8 +4,11 @@ use std::path::Path;
 use bech32::Hrp;
 use log::{error, info};
 
-/// Re-encode `AGE-PLUGIN-YUBIKEY-1` identities in a file to
-/// `AGE-PLUGIN-YUBIKEY-AGENT-`, preserving the bech32 payload.
+/// Re-encode age-plugin-yubikey identities in a file to
+/// `AGE-PLUGIN-YUBIKEY-DAEMON-`, preserving the bech32 payload.
+///
+/// Accepts both `AGE-PLUGIN-YUBIKEY-1` (original) and `AGE-PLUGIN-YUBIKEY-AGENT-1`
+/// (from a prior install of age-plugin-yubikey-agent) as input HRPs.
 ///
 /// Writes atomically (tmp + rename) and saves the original as `{path}.bak`.
 /// Refuses to run if the backup file already exists.
@@ -24,10 +27,12 @@ pub fn convert_identities(path: &str) -> Result<(), Box<dyn std::error::Error>> 
     let mut modified = false;
 
     let new_hrp =
-        Hrp::parse("AGE-PLUGIN-YUBIKEY-AGENT-").expect("Hardcoded HRP string is always valid");
+        Hrp::parse("AGE-PLUGIN-YUBIKEY-DAEMON-").expect("Hardcoded HRP string is always valid");
 
     for line in content.lines() {
-        if line.starts_with("AGE-PLUGIN-YUBIKEY-1") {
+        if line.starts_with("AGE-PLUGIN-YUBIKEY-1")
+            || line.starts_with("AGE-PLUGIN-YUBIKEY-AGENT-1")
+        {
             let (_hrp, data) = bech32::decode(line)?;
             let new_str = bech32::encode::<bech32::Bech32>(new_hrp, &data)?;
 
@@ -41,7 +46,7 @@ pub fn convert_identities(path: &str) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     if !modified {
-        info!("No AGE-PLUGIN-YUBIKEY-1 identities found in {path}");
+        info!("No convertible identities found in {path}");
         return Ok(());
     }
 
@@ -54,6 +59,6 @@ pub fn convert_identities(path: &str) -> Result<(), Box<dyn std::error::Error>> 
     fs::rename(&tmp_path, path)
         .inspect_err(|e| error!("Failed to rename {tmp_path} to {path}: {e}"))?;
 
-    info!("Converted identities in {path} to AGE-PLUGIN-YUBIKEY-AGENT-; original saved as {bak_path}");
+    info!("Converted identities in {path} to AGE-PLUGIN-YUBIKEY-DAEMON-; original saved as {bak_path}");
     Ok(())
 }

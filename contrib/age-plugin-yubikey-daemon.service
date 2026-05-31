@@ -1,10 +1,10 @@
 [Unit]
-Description=age-plugin-yubikey-agent PIN-caching daemon
-Documentation=https://github.com/brongan/age-plugin-yubikey-agent
-Requires=age-plugin-yubikey-agent.socket
+Description=age-plugin-yubikey-daemon PIN-caching daemon
+Documentation=https://github.com/brongan/age-plugin-yubikey-daemon
+Requires=age-plugin-yubikey-daemon.socket
 
 [Service]
-ExecStart=/usr/bin/age-plugin-yubikey-agent
+ExecStart=/usr/bin/age-plugin-yubikey-daemon
 
 # Restart on failure (e.g. YubiKey removed), but not too aggressively.
 Restart=on-failure

@@ -1,10 +1,10 @@
 # Maintainer: Brennan Tracy
-pkgname=age-plugin-yubikey-agent
+pkgname=age-plugin-yubikey-daemon
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='YubiKey PIN-caching daemon for age-plugin-yubikey — enter PIN once, touch to decrypt'
 arch=('x86_64' 'aarch64')
-url='https://github.com/brongan/age-plugin-yubikey-agent'
+url='https://github.com/brongan/age-plugin-yubikey-daemon'
 license=('MIT' 'Apache-2.0')
 depends=('pcsclite' 'ccid')
 makedepends=('cargo' 'pkg-config')

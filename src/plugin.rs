@@ -5,11 +5,11 @@ use age_core::format::{FileKey, Stanza};
 use age_core::secrecy::ExposeSecret;
 use age_plugin::identity::{self, IdentityPluginV1};
 use age_plugin::{Callbacks, PluginHandler};
-use age_plugin_yubikey_agent::protocol::{
+use age_plugin_yubikey_daemon::protocol::{
     EcdhError, EcdhResponse, ProbeKeyResult, YubikeyAgentClient,
 };
-use age_plugin_yubikey_agent::socket;
-use age_plugin_yubikey_agent::stanza::{IdentityStub, PivP256Stanza};
+use age_plugin_yubikey_daemon::socket;
+use age_plugin_yubikey_daemon::stanza::{IdentityStub, PivP256Stanza};
 use log::{debug, warn};
 use tarpc::client;
 use tarpc::context;
@@ -18,7 +18,7 @@ use tokio::runtime::Builder as TokioRuntime;
 use tokio_serde::formats::Bincode;
 use zerocopy::FromBytes;
 
-const PLUGIN_NAME: &str = "yubikey-agent";
+const PLUGIN_NAME: &str = "yubikey-daemon";
 
 pub(crate) struct Handler;
 
@@ -258,7 +258,7 @@ impl IdentityPluginV1 for IdentityPlugin {
         rt.block_on(async {
             let Ok(client) = connect_daemon().await else {
                 let _ = callbacks.error(identity::Error::Internal {
-                    message: "age-plugin-yubikey-agent daemon is not running.".to_string(),
+                    message: "age-plugin-yubikey-daemon is not running.".to_string(),
                 });
                 return Ok(FileKeyMap::new());
             };

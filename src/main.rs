@@ -1,17 +1,17 @@
-//! age-plugin-yubikey-agent: PIN-caching daemon + age plugin + identity file conversion
+//! age-plugin-yubikey-daemon: PIN-caching daemon + age plugin + identity file conversion
 //!
 //! Invoked without arguments, it runs as a daemon holding a PCSC session to the `YubiKey`.
 //! Invoked with `--age-plugin=identity-v1` (by `age`), it
 //! speaks the C2SP age-plugin protocol and proxies ECDH to the daemon.
 //! Invoked with a file path, it converts an age-plugin-yubikey identity file to
-//! age-plugin-yubikey-agent.
+//! age-plugin-yubikey-daemon.
 
 #![forbid(unsafe_code)]
 
 use log::error;
 
-use age_plugin_yubikey_agent::daemon;
-use age_plugin_yubikey_agent::socket;
+use age_plugin_yubikey_daemon::daemon;
+use age_plugin_yubikey_daemon::socket;
 use log::info;
 
 use crate::convert_identities::convert_identities;

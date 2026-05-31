@@ -1,10 +1,10 @@
 [package]
-name = "age-plugin-yubikey-agent"
+name = "age-plugin-yubikey-daemon"
 description = "YubiKey PIN-caching daemon for age-plugin-yubikey decryption"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/brongan/age-plugin-yubikey-agent"
+repository = "https://github.com/brongan/age-plugin-yubikey-daemon"
 readme = "README.md"
 keywords = ["age", "yubikey", "piv", "encryption", "daemon"]
 categories = ["cryptography", "command-line-utilities"]

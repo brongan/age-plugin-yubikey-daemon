@@ -18,7 +18,7 @@ Initial release.
   PIN only after a `probe_key` confirms the right YubiKey is connected.
 - **Identity conversion**: any non-`--age-plugin=` argument is treated as the
   path to an identity file whose `AGE-PLUGIN-YUBIKEY-` entries are re-encoded
-  as `AGE-PLUGIN-YUBIKEY-AGENT-` (atomic write, `.bak` backup).
+  as `AGE-PLUGIN-YUBIKEY-DAEMON-` (atomic write, `.bak` backup).
 - **systemd integration**: socket-activated user service (`.socket` + `.service`)
   with hardening (`RestrictAddressFamilies=AF_UNIX`, `SystemCallFilter`,
   `NoNewPrivileges`, `UMask=0177`, etc.).
@@ -30,4 +30,4 @@ Initial release.
 - Access control rides on the `0700` `$XDG_RUNTIME_DIR`; the socket is `0600`
   under the systemd unit.
 
-[0.1.0]: https://github.com/brongan/age-plugin-yubikey-agent/releases/tag/v0.1.0
+[0.1.0]: https://github.com/brongan/age-plugin-yubikey-daemon/releases/tag/v0.1.0
