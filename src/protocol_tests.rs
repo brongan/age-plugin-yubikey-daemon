@@ -5,7 +5,6 @@ use p256::SecretKey;
 use tarpc::client;
 use tarpc::context;
 use tarpc::server::Channel;
-use tokio::net::UnixListener;
 use tokio_serde::formats::Bincode;
 
 fn mock_pubkey() -> p256::PublicKey {
@@ -53,21 +52,17 @@ impl YubikeyAgent for MockDaemon {
 }
 
 #[tokio::test]
-async fn probe_key_round_trip() {
-    let dir = std::env::temp_dir().join("age-agent-test-probe_key");
-    std::fs::create_dir_all(&dir).unwrap();
-    let sock_path = dir.join(format!("mock-probe_key-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&sock_path);
+async fn probe_key_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
 
-    let listener = UnixListener::bind(&sock_path).unwrap();
-    let mut incoming = tarpc::serde_transport::unix::listen_on(listener, Bincode::default)
-        .await
-        .unwrap();
+    let server_transport = tarpc::serde_transport::new(
+        tokio_util::codec::LengthDelimitedCodec::builder().new_framed(server_stream),
+        Bincode::default(),
+    );
 
-    let server_task = tokio::spawn(async move {
-        let transport = incoming.next().await.unwrap().unwrap();
+    tokio::spawn(async move {
         let server = MockDaemon;
-        let channel = tarpc::server::BaseChannel::with_defaults(transport);
+        let channel = tarpc::server::BaseChannel::with_defaults(server_transport);
         channel
             .execute(server.serve())
             .for_each(|response| async move {
@@ -76,34 +71,25 @@ async fn probe_key_round_trip() {
             .await;
     });
 
-    let transport = tarpc::serde_transport::unix::connect(&sock_path, Bincode::default)
-        .await
-        .unwrap();
-    let client = YubikeyAgentClient::new(client::Config::default(), transport).spawn();
+    let client_transport = tarpc::serde_transport::new(
+        tokio_util::codec::LengthDelimitedCodec::builder().new_framed(client_stream),
+        Bincode::default(),
+    );
+    let client = YubikeyAgentClient::new(client::Config::default(), client_transport).spawn();
 
     let res = client
         .probe_key(context::current(), 12345, 0x82, [0; 4])
-        .await
-        .unwrap();
+        .await?;
     assert_eq!(res, ProbeKeyResult::Match);
 
-    server_task.abort();
+    Ok(())
 }
 
 #[tokio::test]
-async fn ecdh_round_trip() {
-    let dir = std::env::temp_dir().join("age-agent-test-ecdh");
-    std::fs::create_dir_all(&dir).unwrap();
-    let sock_path = dir.join(format!("mock-ecdh-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&sock_path);
-
-    let listener = UnixListener::bind(&sock_path).unwrap();
-    let mut incoming = tarpc::serde_transport::unix::listen_on(listener, Bincode::default)
-        .await
-        .unwrap();
-
-    let server_task = tokio::spawn(async move {
-        while let Some(Ok(transport)) = incoming.next().await {
+async fn ecdh_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+    tokio::spawn(async move {
+        while let Some(transport) = rx.recv().await {
             tokio::spawn(async move {
                 let server = MockDaemon;
                 let channel = tarpc::server::BaseChannel::with_defaults(transport);
@@ -117,21 +103,38 @@ async fn ecdh_round_trip() {
         }
     });
 
-    let transport1 = tarpc::serde_transport::unix::connect(&sock_path, Bincode::default)
-        .await
-        .unwrap();
-    let client1 = YubikeyAgentClient::new(client::Config::default(), transport1).spawn();
+    // First connection
+    let (client_stream1, server_stream1) = tokio::io::duplex(1024);
+    let server_transport1 = tarpc::serde_transport::new(
+        tokio_util::codec::LengthDelimitedCodec::builder().new_framed(server_stream1),
+        Bincode::default(),
+    );
+    tx.send(server_transport1).await?;
+
+    let client_transport1 = tarpc::serde_transport::new(
+        tokio_util::codec::LengthDelimitedCodec::builder().new_framed(client_stream1),
+        Bincode::default(),
+    );
+    let client1 = YubikeyAgentClient::new(client::Config::default(), client_transport1).spawn();
 
     let res = client1
         .ecdh(context::current(), 12345, 0x82, [0; 4], mock_pubkey(), None)
-        .await
-        .unwrap();
+        .await?;
     assert!(matches!(res, Err(EcdhError::NeedPin)));
 
-    let transport2 = tarpc::serde_transport::unix::connect(&sock_path, Bincode::default)
-        .await
-        .unwrap();
-    let client2 = YubikeyAgentClient::new(client::Config::default(), transport2).spawn();
+    // Second connection
+    let (client_stream2, server_stream2) = tokio::io::duplex(1024);
+    let server_transport2 = tarpc::serde_transport::new(
+        tokio_util::codec::LengthDelimitedCodec::builder().new_framed(server_stream2),
+        Bincode::default(),
+    );
+    tx.send(server_transport2).await?;
+
+    let client_transport2 = tarpc::serde_transport::new(
+        tokio_util::codec::LengthDelimitedCodec::builder().new_framed(client_stream2),
+        Bincode::default(),
+    );
+    let client2 = YubikeyAgentClient::new(client::Config::default(), client_transport2).spawn();
 
     let res2 = client2
         .ecdh(
@@ -142,15 +145,10 @@ async fn ecdh_round_trip() {
             mock_pubkey(),
             Some("654321".to_string()),
         )
-        .await
-        .unwrap();
+        .await??;
 
-    match res2 {
-        Ok(EcdhResponse { shared_secret, .. }) => {
-            assert_eq!(shared_secret, [0xCC; 32]);
-        }
-        other => panic!("expected Ok, got {:?}", other),
-    }
+    assert_eq!(res2.shared_secret, [0xCC; 32]);
 
-    server_task.abort();
+    Ok(())
 }
+

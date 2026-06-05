@@ -62,6 +62,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-serde",
+ "tokio-util",
  "xdg",
  "yubikey",
  "zerocopy",
