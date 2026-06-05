@@ -7,9 +7,6 @@ use log::{error, info};
 /// Re-encode age-plugin-yubikey identities in a file to
 /// `AGE-PLUGIN-YUBIKEY-DAEMON-`, preserving the bech32 payload.
 ///
-/// Accepts both `AGE-PLUGIN-YUBIKEY-1` (original) and `AGE-PLUGIN-YUBIKEY-AGENT-1`
-/// (from a prior install of age-plugin-yubikey-agent) as input HRPs.
-///
 /// Writes atomically (tmp + rename) and saves the original as `{path}.bak`.
 /// Refuses to run if the backup file already exists.
 pub fn convert_identities(path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -30,9 +27,7 @@ pub fn convert_identities(path: &str) -> Result<(), Box<dyn std::error::Error>> 
         Hrp::parse("AGE-PLUGIN-YUBIKEY-DAEMON-").expect("Hardcoded HRP string is always valid");
 
     for line in content.lines() {
-        if line.starts_with("AGE-PLUGIN-YUBIKEY-1")
-            || line.starts_with("AGE-PLUGIN-YUBIKEY-AGENT-1")
-        {
+        if line.starts_with("AGE-PLUGIN-YUBIKEY-1") {
             let (_hrp, data) = bech32::decode(line)?;
             let new_str = bech32::encode::<bech32::Bech32>(new_hrp, &data)?;
 
@@ -59,6 +54,8 @@ pub fn convert_identities(path: &str) -> Result<(), Box<dyn std::error::Error>> 
     fs::rename(&tmp_path, path)
         .inspect_err(|e| error!("Failed to rename {tmp_path} to {path}: {e}"))?;
 
-    info!("Converted identities in {path} to AGE-PLUGIN-YUBIKEY-DAEMON-; original saved as {bak_path}");
+    info!(
+        "Converted identities in {path} to AGE-PLUGIN-YUBIKEY-DAEMON-; original saved as {bak_path}"
+    );
     Ok(())
 }

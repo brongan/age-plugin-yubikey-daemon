@@ -2,7 +2,7 @@
 //!
 //! Matches the wire format used by
 //! [age-plugin-yubikey](https://github.com/str4d/age-plugin-yubikey) so files
-//! encrypted with the original plugin decrypt unchanged through this agent.
+//! encrypted with the original plugin decrypt unchanged through this daemon.
 
 use age_core::format::{FILE_KEY_BYTES, FileKey, Stanza};
 use age_core::primitives::{aead_decrypt, hkdf};

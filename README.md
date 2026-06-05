@@ -6,15 +6,15 @@ Inspired by Filippo Valsorda's [passage workflow](https://words.filippo.io/passa
 
 ## Problem
 
-`age-plugin-yubikey` opens a fresh PCSC session for every decryption, which means the YubiKey's "Once" PIN policy doesn't help — you're prompted for your PIN every time. This agent holds a persistent PCSC session so the PIN only needs to be entered once.
+`age-plugin-yubikey` opens a fresh PCSC session for every decryption, which means the YubiKey's "Once" PIN policy doesn't help — you're prompted for your PIN every time. This daemon holds a persistent PCSC session so the PIN only needs to be entered once.
 
 ```
-# Without the agent:
+# Without the daemon:
 $ passage show -c github.com/token    # PIN + touch
 $ passage show -c email/password      # PIN + touch (again)
 $ passage show -c ssh/key             # PIN + touch (again)
 
-# With the agent:
+# With the daemon:
 $ passage show -c github.com/token    # PIN + touch (first time)
 $ passage show -c email/password      # touch only
 $ passage show -c ssh/key             # touch only
@@ -35,13 +35,13 @@ flowchart LR
 
 - **`--age-plugin=identity-v1`** — Invoked automatically by `age` when it encounters `AGE-PLUGIN-YUBIKEY-DAEMON-` identities. Speaks the [C2SP age-plugin protocol](https://c2sp.org/age-plugin) on stdin/stdout, proxies ECDH operations to the daemon.
 
-- **`<file>`** — Any argument that isn't `--age-plugin=…` is treated as the path to an identity file. A one-shot utility that re-encodes `AGE-PLUGIN-YUBIKEY-` (or `AGE-PLUGIN-YUBIKEY-AGENT-`) identities in `<file>` as `AGE-PLUGIN-YUBIKEY-DAEMON-` so that `age` routes decryption through this daemon.
+- **`<file>`** — Any argument that isn't `--age-plugin=…` is treated as the path to an identity file. A one-shot utility that re-encodes `AGE-PLUGIN-YUBIKEY-` identities in `<file>` as `AGE-PLUGIN-YUBIKEY-DAEMON-` so that `age` routes decryption through this daemon.
 
 The original `age-plugin-yubikey` is left untouched — it still handles key generation, identity listing, and encryption. This daemon only handles decryption.
 
 ## Plugin call path
 
-How `age -d` ends up talking to this agent, from identity to file key:
+How `age -d` ends up talking to this daemon, from identity to file key:
 
 1. **`age` selects the plugin.** An identity with the bech32 HRP `AGE-PLUGIN-YUBIKEY-DAEMON-` maps, by C2SP convention, to a binary named `age-plugin-yubikey-daemon` on `$PATH`. `age` spawns it as `age-plugin-yubikey-daemon --age-plugin=identity-v1` and speaks the age-plugin protocol over stdin/stdout.
 2. **Dispatch.** The binary hands `identity-v1` to `age_plugin::run_state_machine`, which drives the protocol and calls back into our `IdentityPlugin`. (Recipient-v1 is refused — encryption stays with `age-plugin-yubikey`.)
@@ -92,18 +92,7 @@ age-plugin-yubikey-daemon ~/.config/passage/identities
 
 This re-encodes each identity with the new bech32 Human-Readable Part (HRP) and updates the checksum. The underlying key data is unchanged — same serial, slot, and tag.
 
-Your existing identities are kept in a `.bak` file. The converter also accepts `AGE-PLUGIN-YUBIKEY-AGENT-` identities (from a prior version of this project).
-
-### Migrating from age-plugin-yubikey-agent
-
-If you previously used `age-plugin-yubikey-agent`, your identities already have the `AGE-PLUGIN-YUBIKEY-AGENT-` HRP. The converter handles this, but you may need to remove the `.bak` from the first conversion:
-
-```sh
-systemctl --user disable --now age-plugin-yubikey-agent.socket
-rm ~/.config/passage/identities.bak   # from prior conversion
-age-plugin-yubikey-daemon ~/.config/passage/identities
-systemctl --user enable --now age-plugin-yubikey-daemon.socket
-```
+Your existing identities are kept in a `.bak` file.
 
 ## Usage
 
