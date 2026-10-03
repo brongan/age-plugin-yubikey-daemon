@@ -5,8 +5,9 @@ use crate::protocol::{
 };
 use futures::StreamExt;
 use log::{error, info, warn};
-use p256::PublicKey;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::pkcs8::AssociatedOid;
+use p256::{NistP256, PublicKey};
 use sha2::{Digest, Sha256};
 use tarpc::server::Channel;
 use tokio::signal::unix::{SignalKind, signal};
@@ -17,7 +18,6 @@ use zeroize::Zeroizing;
 use yubikey::Certificate;
 use yubikey::Context;
 use yubikey::YubiKey;
-use yubikey::certificate::PublicKeyInfo;
 use yubikey::piv::AlgorithmId;
 use yubikey::piv::RetiredSlotId;
 use yubikey::piv::SlotId;
@@ -162,11 +162,11 @@ fn read_slot_pubkey(
         Err(_) => return Err(EcdhError::CertRead(slot)),
     };
 
-    let encoded_point = match cert.subject_pki() {
-        PublicKeyInfo::EcP256(pt) => pt,
-        _ => return Err(EcdhError::CertNotP256(slot)),
-    };
-    let pk = PublicKey::try_from(encoded_point).map_err(|_| EcdhError::CertInvalidKey)?;
+    let spki = cert.subject_pki();
+    if spki.algorithm.parameters_oid().ok() != Some(NistP256::OID) {
+        return Err(EcdhError::CertNotP256(slot));
+    }
+    let pk = PublicKey::try_from(spki).map_err(|_| EcdhError::CertInvalidKey)?;
     let hash = Sha256::digest(pk.to_encoded_point(true).as_bytes());
     let computed_tag: [u8; TAG_BYTES] = hash[..TAG_BYTES].try_into().unwrap();
 

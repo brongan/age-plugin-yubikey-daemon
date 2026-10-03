@@ -16,10 +16,10 @@ age-plugin = "0.6"
 base64 = "0.22"
 
 # YubiKey PIV
-yubikey = { version = "=0.8.0-pre.0", features = ["untested"] }
+yubikey = { version = "0.8.0", features = ["untested"] }
 
 # Crypto
-p256 = { version = "0.13", features = ["ecdh", "serde"] }
+p256 = { version = "0.13", features = ["ecdh", "pkcs8", "serde"] }
 sha2 = "0.10"
 zeroize = "1"
 zerocopy = { version = "0.8", features = ["derive"] }
