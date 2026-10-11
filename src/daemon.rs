@@ -1,14 +1,22 @@
+use std::error::Error as _;
 use std::io;
+use std::sync::Arc;
 
 use crate::protocol::{
     self, EcdhError, EcdhResponse, EcdhResult, ProbeKeyResult, TAG_BYTES, YubikeyAgent,
 };
+use crate::signing::{self, SigningAgent};
 use futures::StreamExt;
 use log::{error, info, warn};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::AssociatedOid;
 use p256::{NistP256, PublicKey};
+use pinentry::PassphraseInput;
+use rsa::traits::PublicKeyParts;
+use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
+use signature::{SignatureEncoding, Signer as _};
+use ssh_key::public::KeyData;
 use tarpc::server::Channel;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc::Receiver;
@@ -17,7 +25,10 @@ use tokio_serde::formats::Bincode;
 use zeroize::Zeroizing;
 use yubikey::Certificate;
 use yubikey::Context;
+use yubikey::PinPolicy;
 use yubikey::YubiKey;
+use yubikey::certificate::yubikey_signer::{Rsa2048, Signer, YubiRsa};
+use yubikey::piv;
 use yubikey::piv::AlgorithmId;
 use yubikey::piv::RetiredSlotId;
 use yubikey::piv::SlotId;
@@ -55,6 +66,64 @@ impl Session {
             Err(_) => Err(EcdhError::ChipUnavailable),
         }
     }
+
+    /// Verify `pin` on the card and mark this session as verified.
+    fn verify_pin(&mut self, pin: &Zeroizing<String>) -> Result<(), EcdhError> {
+        match self.yubikey.verify_pin(pin.as_bytes()) {
+            Ok(()) => {
+                info!("PIN verified successfully");
+            }
+            Err(e) if is_session_fatal(&e) => return Err(EcdhError::Disconnected),
+            Err(yubikey::Error::WrongPin { tries }) => {
+                warn!("Wrong PIN ({tries} tries remaining)");
+                return Err(EcdhError::WrongPin { tries });
+            }
+            Err(yubikey::Error::PinLocked) => {
+                warn!("PIN locked");
+                return Err(EcdhError::PinLocked);
+            }
+            Err(e) => {
+                warn!("PIN verification failed: {e}");
+                return Err(EcdhError::PinRejected);
+            }
+        }
+        self.pin_verified = true;
+        Ok(())
+    }
+}
+
+/// Signing errors. The ssh-agent protocol has only a generic failure reply,
+/// so the daemon logs these errors.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum SignError {
+    #[error("YubiKey is disconnected")]
+    Disconnected,
+    #[error("YubiKey worker stopped")]
+    WorkerExited,
+    #[error("could not read certificate from slot 0x{0:02x}")]
+    CertRead(u8),
+    #[error("certificate in slot 0x{0:02x} does not contain an RSA 2048 key")]
+    CertKey(u8),
+    #[error("YubiKey needs a PIN or touch for this signature")]
+    AuthenticationRequired,
+    #[error("YubiKey was not touched in time")]
+    TouchTimeout,
+    #[error("could not find a pinentry program")]
+    PinentryMissing,
+    #[error("pinentry error: {0}")]
+    Pinentry(String),
+    #[error("PIN entry was cancelled")]
+    PinCancelled,
+    #[error("PIN is locked")]
+    PinLocked,
+    #[error("could not verify PIN")]
+    PinRejected,
+    #[error("requested key is not in a slot listed with --sign-slot")]
+    UnknownKey,
+    #[error("signature flags 0x{0:x} are unsupported; only rsa-sha2-256 is supported")]
+    UnsupportedFlags(u32),
+    #[error("could not sign data")]
+    SignFailed,
 }
 
 /// Check whether the connected YubiKey has a P-256 key matching the given
@@ -96,28 +165,8 @@ fn handle_ecdh(
     }
 
     if !session.pin_verified {
-        let Some(pin) = pin.as_ref() else {
-            return Err(EcdhError::NeedPin);
-        };
-        match session.yubikey.verify_pin(pin.as_bytes()) {
-            Ok(()) => {
-                info!("PIN verified successfully");
-            }
-            Err(e) if is_session_fatal(&e) => return Err(EcdhError::Disconnected),
-            Err(yubikey::Error::WrongPin { tries }) => {
-                warn!("Wrong PIN ({tries} tries remaining)");
-                return Err(EcdhError::WrongPin { tries });
-            }
-            Err(yubikey::Error::PinLocked) => {
-                warn!("PIN locked");
-                return Err(EcdhError::PinLocked);
-            }
-            Err(e) => {
-                warn!("PIN verification failed: {e}");
-                return Err(EcdhError::PinRejected);
-            }
-        }
-        session.pin_verified = true;
+        let pin = pin.as_ref().ok_or(EcdhError::NeedPin)?;
+        session.verify_pin(pin)?;
     }
 
     let slot_id = RetiredSlotId::try_from(slot).map_err(|_| EcdhError::InvalidSlot(slot))?;
@@ -146,6 +195,114 @@ fn handle_ecdh(
         shared_secret,
         recipient_pubkey,
     })
+}
+
+/// Read the RSA 2048 public key from a PIV slot certificate and convert it to SSH form.
+fn handle_slot_key(session: &mut Session, slot: SlotId) -> Result<KeyData, SignError> {
+    let slot_byte = u8::from(slot);
+    let cert = read_cert(&mut session.yubikey, slot)?;
+    let key = rsa::RsaPublicKey::try_from(cert.subject_pki())
+        .map_err(|_| SignError::CertKey(slot_byte))?;
+    if key.n().bits() != 2048 {
+        return Err(SignError::CertKey(slot_byte));
+    }
+    ssh_key::public::RsaPublicKey::try_from(&key)
+        .map(KeyData::Rsa)
+        .map_err(|_| SignError::CertKey(slot_byte))
+}
+
+/// Sign `message` with the RSA 2048 key in `slot` using PKCS#1 v1.5 and
+/// SHA-256. If the card says the slot needs a PIN, ask with pinentry and try
+/// again.
+fn handle_sign(session: &mut Session, slot: SlotId, message: &[u8]) -> Result<Vec<u8>, SignError> {
+    let cert = read_cert(&mut session.yubikey, slot)?;
+    match sign_with_card(&mut session.yubikey, slot, &cert, message) {
+        Err(SignError::AuthenticationRequired) => {
+            let policy = pin_policy(&mut session.yubikey, slot);
+            if !needs_pin(policy, session.pin_verified) {
+                return Err(SignError::TouchTimeout);
+            }
+            prompt_and_verify_pin(session, slot.into())?;
+            sign_with_card(&mut session.yubikey, slot, &cert, message)
+        }
+        result => result,
+    }
+}
+
+/// Firmware before 5.3 cannot report the PIN policy.
+fn pin_policy(yubikey: &mut YubiKey, slot: SlotId) -> Option<PinPolicy> {
+    piv::metadata(yubikey, slot).ok()?.policy.map(|(pin, _)| pin)
+}
+
+/// The card returns the same error when it needs a PIN or times out.
+/// Check whether a PIN is needed.
+fn needs_pin(policy: Option<PinPolicy>, pin_verified: bool) -> bool {
+    match policy {
+        Some(PinPolicy::Never) => false,
+        Some(PinPolicy::Once) => !pin_verified,
+        _ => true,
+    }
+}
+
+fn sign_with_card(
+    yubikey: &mut YubiKey,
+    slot: SlotId,
+    cert: &Certificate,
+    message: &[u8],
+) -> Result<Vec<u8>, SignError> {
+    let signer = Signer::<YubiRsa<Rsa2048>>::new(yubikey, slot, cert.subject_pki())
+        .map_err(|_| SignError::CertKey(slot.into()))?;
+    let error = match signer.try_sign(message) {
+        Ok(signature) => return Ok(signature.to_vec()),
+        Err(e) => e,
+    };
+    match error
+        .source()
+        .and_then(|source| source.downcast_ref::<yubikey::Error>())
+    {
+        Some(yubikey::Error::AuthenticationError) => Err(SignError::AuthenticationRequired),
+        Some(e) if is_session_fatal(e) => Err(SignError::Disconnected),
+        _ => {
+            warn!("Could not sign data: {error}");
+            Err(SignError::SignFailed)
+        }
+    }
+}
+
+/// Ask for a PIN with pinentry until the card accepts it, the user cancels,
+/// or the PIN is locked.
+fn prompt_and_verify_pin(session: &mut Session, slot: u8) -> Result<(), SignError> {
+    let description = format!("Enter the YubiKey PIN to sign with PIV slot {slot:02x}.");
+    let mut error: Option<String> = None;
+    loop {
+        let mut input = PassphraseInput::with_default_binary().ok_or(SignError::PinentryMissing)?;
+        input.with_description(&description).with_prompt("PIN");
+        if let Some(error) = &error {
+            input.with_error(error);
+        }
+        let pin = match input.interact() {
+            Ok(pin) => Zeroizing::new(pin.expose_secret().to_owned()),
+            Err(pinentry::Error::Cancelled) => return Err(SignError::PinCancelled),
+            Err(e) => return Err(SignError::Pinentry(e.to_string())),
+        };
+        match session.verify_pin(&pin) {
+            Ok(()) => return Ok(()),
+            Err(EcdhError::WrongPin { tries }) => {
+                error = Some(format!("Incorrect PIN; {tries} tries remain"));
+            }
+            Err(EcdhError::Disconnected) => return Err(SignError::Disconnected),
+            Err(EcdhError::PinLocked) => return Err(SignError::PinLocked),
+            Err(_) => return Err(SignError::PinRejected),
+        }
+    }
+}
+
+fn read_cert(yubikey: &mut YubiKey, slot: SlotId) -> Result<Certificate, SignError> {
+    match Certificate::read(yubikey, slot) {
+        Ok(c) => Ok(c),
+        Err(e) if is_session_fatal(&e) => Err(SignError::Disconnected),
+        Err(_) => Err(SignError::CertRead(slot.into())),
+    }
 }
 
 /// Read the P-256 public key from a PIV slot's certificate and verify its
@@ -177,7 +334,7 @@ fn read_slot_pubkey(
     Ok(pk)
 }
 
-enum WorkerRequest {
+pub(crate) enum WorkerRequest {
     ProbeKey {
         serial: u32,
         slot: u8,
@@ -191,6 +348,15 @@ enum WorkerRequest {
         ephemeral_pubkey: PublicKey,
         pin: Option<String>,
         reply: oneshot::Sender<EcdhResult>,
+    },
+    SlotKey {
+        slot: SlotId,
+        reply: oneshot::Sender<Result<KeyData, SignError>>,
+    },
+    Sign {
+        slot: SlotId,
+        message: Vec<u8>,
+        reply: oneshot::Sender<Result<Vec<u8>, SignError>>,
     },
 }
 
@@ -249,8 +415,40 @@ fn yubikey_worker(rx: &mut Receiver<WorkerRequest>) {
                     error!("Failed to send yubikey worker result to daemon.");
                 }
             }
+            WorkerRequest::SlotKey { slot, reply } => {
+                let result = with_sign_session(&mut session, |s| handle_slot_key(s, slot));
+                if reply.send(result).is_err() {
+                    error!("Failed to send yubikey worker result to daemon.");
+                }
+            }
+            WorkerRequest::Sign {
+                slot,
+                message,
+                reply,
+            } => {
+                let result = with_sign_session(&mut session, |s| handle_sign(s, slot, &message));
+                if reply.send(result).is_err() {
+                    error!("Failed to send yubikey worker result to daemon.");
+                }
+            }
         }
     }
+}
+
+/// Run a signing operation and drop the session if the YubiKey disconnects.
+fn with_sign_session<T>(
+    session: &mut Option<Session>,
+    op: impl FnOnce(&mut Session) -> Result<T, SignError>,
+) -> Result<T, SignError> {
+    let Some(s) = session else {
+        return Err(SignError::Disconnected);
+    };
+    let result = op(s);
+    if matches!(&result, Err(SignError::Disconnected)) {
+        warn!("YubiKey disconnected; dropping handle");
+        *session = None;
+    }
+    result
 }
 
 #[derive(Clone)]
@@ -316,13 +514,27 @@ impl protocol::YubikeyAgent for Server {
     }
 }
 
-/// Serve RPC requests until SIGINT/SIGTERM.
-pub async fn run(listener: tokio::net::UnixListener) -> io::Result<()> {
+/// Serve age RPC requests on `listener` and ssh-agent signing requests on
+/// `signing_listener` until SIGINT/SIGTERM. Offer only keys in `sign_slots`.
+pub async fn run(
+    listener: tokio::net::UnixListener,
+    signing_listener: tokio::net::UnixListener,
+    sign_slots: Vec<SlotId>,
+) -> io::Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
 
     let (tx, mut rx) = mpsc::channel::<WorkerRequest>(1);
     tokio::task::spawn_blocking(move || yubikey_worker(&mut rx));
+
+    if !sign_slots.is_empty() {
+        info!("Signing is enabled for slots: {sign_slots:?}");
+    }
+    let agent = SigningAgent::new(tx.clone(), Arc::from(sign_slots));
+    tokio::spawn(ssh_agent_lib::agent::listen(
+        signing::Listener(signing_listener),
+        agent,
+    ));
 
     let mut incoming = tarpc::serde_transport::unix::listen_on(listener, Bincode::default).await?;
 
@@ -359,3 +571,7 @@ pub async fn run(listener: tokio::net::UnixListener) -> io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "daemon_tests.rs"]
+mod tests;

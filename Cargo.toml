@@ -20,6 +20,8 @@ yubikey = { version = "0.8.0", features = ["untested"] }
 
 # Crypto
 p256 = { version = "0.13", features = ["ecdh", "pkcs8", "serde"] }
+rsa = "0.9"
+signature = { version = "2.2", features = ["std"] }
 sha2 = "0.10"
 zeroize = "1"
 zerocopy = { version = "0.8", features = ["derive"] }
@@ -28,6 +30,13 @@ serde = { version = "1", features = ["derive"] }
 tarpc = { version = "0.37", features = ["serde-transport", "unix"] }
 tokio-serde = { version = "0.9", features = ["bincode"] }
 futures = "0.3"
+
+# Signing over the ssh-agent protocol
+ssh-agent-lib = "0.6"
+ssh-key = { version = "0.6", features = ["rsa"] }
+async-trait = "0.1"
+pinentry = "0.8"
+secrecy = "0.10"
 
 # Socket activation
 listenfd = "1.0"
@@ -38,7 +47,7 @@ thiserror = "2.0"
 env_logger = "0.11"
 bech32 = "0.11"
 xdg = "3"
-tokio = { version = "1", features = ["rt", "net", "macros", "signal", "io-util", "sync"] }
+tokio = { version = "1", features = ["rt", "net", "macros", "signal", "io-util", "sync", "time"] }
 
 [dev-dependencies]
 rand = "0.8"

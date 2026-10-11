@@ -6,17 +6,25 @@ use std::io;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 
+use listenfd::ListenFd;
 use log::info;
 use tokio::net::UnixListener;
 use xdg::BaseDirectories;
 
 static XDG_PREFIX: &str = "com.brongan.age-plugin-yubikey-daemon";
 static FILENAME: &str = "daemon.sock";
+static SIGNING_FILENAME: &str = "signing.sock";
 
 /// Creates the socket directory and returns the path at
 /// `$XDG_RUNTIME_DIR/com.brongan.age-plugin-yubikey-daemon/daemon.sock`.
 pub fn create() -> io::Result<PathBuf> {
     BaseDirectories::with_prefix(XDG_PREFIX).place_runtime_file(FILENAME)
+}
+
+/// Creates the socket directory and returns the path at
+/// `$XDG_RUNTIME_DIR/com.brongan.age-plugin-yubikey-daemon/signing.sock`.
+pub fn create_signing() -> io::Result<PathBuf> {
+    BaseDirectories::with_prefix(XDG_PREFIX).place_runtime_file(SIGNING_FILENAME)
 }
 
 /// Returns the path to an existing socket, or an error if it doesn't exist.
@@ -51,10 +59,11 @@ pub fn bind(socket_path: &Path) -> io::Result<UnixListener> {
     UnixListener::bind(socket_path)
 }
 
-/// Take a systemd-activated Unix listener via `listenfd`.
-pub fn from_systemd() -> io::Result<Option<UnixListener>> {
-    let std_listener = listenfd::ListenFd::from_env()
-        .take_unix_listener(0)
+/// Take a systemd-activated Unix listener via `listenfd`. `index` is the
+/// position of the socket's `ListenStream=` line in the socket unit.
+pub fn from_systemd(fds: &mut ListenFd, index: usize) -> io::Result<Option<UnixListener>> {
+    let std_listener = fds
+        .take_unix_listener(index)
         .map_err(io::Error::other)?;
     std_listener
         .map(|l| {

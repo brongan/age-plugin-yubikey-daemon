@@ -33,11 +33,13 @@ flowchart LR
 
 - **No args** — Daemon mode. Holds a persistent PCSC session to the YubiKey, listens on a Unix socket in `$XDG_RUNTIME_DIR`, caches PIN verification for the lifetime of the session. This is what the systemd unit launches.
 
+- **`--sign-slot <slot>`** (repeatable) — Enable signing for the listed PIV slots. See [Signing](#signing).
+
 - **`--age-plugin=identity-v1`** — Invoked automatically by `age` when it encounters `AGE-PLUGIN-YUBIKEY-DAEMON-` identities. Speaks the [C2SP age-plugin protocol](https://c2sp.org/age-plugin) on stdin/stdout, proxies ECDH operations to the daemon.
 
-- **`<file>`** — Any argument that isn't `--age-plugin=…` is treated as the path to an identity file. A one-shot utility that re-encodes `AGE-PLUGIN-YUBIKEY-` identities in `<file>` as `AGE-PLUGIN-YUBIKEY-DAEMON-` so that `age` routes decryption through this daemon.
+- **`<file>`** — Any argument that isn't `--age-plugin=…` or `--sign-slot` is treated as the path to an identity file. A one-shot utility that re-encodes `AGE-PLUGIN-YUBIKEY-` identities in `<file>` as `AGE-PLUGIN-YUBIKEY-DAEMON-` so that `age` routes decryption through this daemon.
 
-The original `age-plugin-yubikey` is left untouched — it still handles key generation, identity listing, and encryption. This daemon only handles decryption.
+The original `age-plugin-yubikey` is left untouched — it still handles key generation, identity listing, and encryption. This daemon only handles decryption, plus signing when started with `--sign-slot`.
 
 ## Plugin call path
 
@@ -112,6 +114,60 @@ To stop caching and require PIN again:
 ```sh
 systemctl --user restart age-plugin-yubikey-daemon
 ```
+
+## Signing
+
+The daemon can use an RSA 2048 YubiKey key to sign through the [ssh-agent protocol](https://datatracker.ietf.org/doc/draft-miller-ssh-agent/). It uses a second socket:
+
+```
+$XDG_RUNTIME_DIR/com.brongan.age-plugin-yubikey-daemon/signing.sock
+```
+
+Signing is off by default. Use `--sign-slot` to enable specific slots. Give each slot as a two-digit hex PIV key slot (`9a`, `9c`, `9d`, `9e`, or `82`–`95`). You can repeat the option:
+
+```sh
+age-plugin-yubikey-daemon --sign-slot 9c
+```
+
+- `REQUEST_IDENTITIES` lists the public keys for the `--sign-slot` slots. The list is empty when `--sign-slot` is not set.
+- `SIGN_REQUEST` must name one of those keys and set the `rsa-sha2-256` flag. The daemon uses RSASSA-PKCS1-v1_5 with SHA-256. It rejects other flags before using the card.
+- The daemon returns the protocol's failure reply for all other ssh-agent messages.
+
+The daemon asks for the PIN with `pinentry` when the slot's PIN policy requires it and this session has not verified a PIN, or when the policy is "always". A slot with PIN policy "never" needs only a touch.
+
+Check it with standard tools:
+
+```sh
+SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/com.brongan.age-plugin-yubikey-daemon/signing.sock ssh-add -L
+```
+
+### Security
+
+- **Only listed slots.** The daemon offers and uses keys only in listed slots.
+- **No raw private-key operations.** The daemon hashes and pads data before sending it to the card. Callers cannot use the RSA key to decrypt data or sign arbitrary raw blocks.
+- **Touch protects each signature.** Any process running as your user can access the socket. With touch policy "always", each signature requires a touch.
+- **Not an SSH login agent.** The daemon does not set `SSH_AUTH_SOCK`, so `ssh` will not use or forward this socket. Do not set `SSH_AUTH_SOCK` to this socket or forward it.
+
+### Enable with systemd
+
+The socket unit listens on both sockets. Add `--sign-slot` in a service override:
+
+```sh
+systemctl --user edit age-plugin-yubikey-daemon.service
+```
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/bin/age-plugin-yubikey-daemon --sign-slot 9c
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user restart age-plugin-yubikey-daemon.socket age-plugin-yubikey-daemon.service
+```
+
+For slots that need a PIN, `pinentry` must be able to reach your display. Import `WAYLAND_DISPLAY` or `DISPLAY` into the systemd user environment. For example: `systemctl --user import-environment WAYLAND_DISPLAY`.
 
 ## Protocol
 
