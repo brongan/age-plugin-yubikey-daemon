@@ -1,6 +1,9 @@
 use std::error::Error as _;
 use std::io;
 use std::sync::Arc;
+use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
 use crate::protocol::{
     self, EcdhError, EcdhResponse, EcdhResult, ProbeKeyResult, TAG_BYTES, YubikeyAgent,
@@ -8,6 +11,7 @@ use crate::protocol::{
 use crate::signing::{self, SigningAgent};
 use futures::StreamExt;
 use log::{error, info, warn};
+use notify_rust::{Notification, Timeout};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::AssociatedOid;
 use p256::{NistP256, PublicKey};
@@ -216,17 +220,55 @@ fn handle_slot_key(session: &mut Session, slot: SlotId) -> Result<KeyData, SignE
 /// again.
 fn handle_sign(session: &mut Session, slot: SlotId, message: &[u8]) -> Result<Vec<u8>, SignError> {
     let cert = read_cert(&mut session.yubikey, slot)?;
-    match sign_with_card(&mut session.yubikey, slot, &cert, message) {
+    let sign = |yubikey: &mut YubiKey| {
+        let _reminder = touch_reminder(slot);
+        sign_with_card(yubikey, slot, &cert, message)
+    };
+    match sign(&mut session.yubikey) {
         Err(SignError::AuthenticationRequired) => {
             let policy = pin_policy(&mut session.yubikey, slot);
             if !needs_pin(policy, session.pin_verified) {
                 return Err(SignError::TouchTimeout);
             }
             prompt_and_verify_pin(session, slot.into())?;
-            sign_with_card(&mut session.yubikey, slot, &cert, message)
+            sign(&mut session.yubikey)
         }
         result => result,
     }
+}
+
+/// How long a signature may take before the card is assumed to wait for a
+/// touch. A signature without a touch takes much less time.
+const TOUCH_REMINDER_DELAY: Duration = Duration::from_secs(3);
+
+/// Remind the user to touch the YubiKey if signing has not finished after
+/// `TOUCH_REMINDER_DELAY`. Signing is finished when the returned sender is
+/// dropped. The D-Bus calls run on their own thread, so a hung notification
+/// server cannot block the YubiKey worker.
+fn touch_reminder(slot: SlotId) -> std_mpsc::Sender<()> {
+    let (done, wait) = std_mpsc::channel();
+    thread::spawn(move || {
+        if wait.recv_timeout(TOUCH_REMINDER_DELAY) != Err(RecvTimeoutError::Timeout) {
+            return;
+        }
+        let body = format!(
+            "Touch your YubiKey to sign with PIV slot {:02x}.",
+            u8::from(slot)
+        );
+        let handle = Notification::new()
+            .summary("YubiKey is waiting for a touch")
+            .body(&body)
+            .timeout(Timeout::Never)
+            .show();
+        match handle {
+            Ok(handle) => {
+                let _ = wait.recv();
+                handle.close();
+            }
+            Err(e) => warn!("Could not show touch reminder: {e}"),
+        }
+    });
+    done
 }
 
 /// Firmware before 5.3 cannot report the PIN policy.

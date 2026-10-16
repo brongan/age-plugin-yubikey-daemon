@@ -48,6 +48,7 @@ env_logger = "0.11"
 bech32 = "0.11"
 xdg = "3"
 tokio = { version = "1", features = ["rt", "net", "macros", "signal", "io-util", "sync", "time"] }
+notify-rust = "4.18.2"
 
 [dev-dependencies]
 rand = "0.8"
