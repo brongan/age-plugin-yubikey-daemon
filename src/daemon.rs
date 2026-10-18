@@ -231,7 +231,32 @@ fn handle_sign(session: &mut Session, slot: SlotId, message: &[u8]) -> Result<Ve
 
 /// Firmware before 5.3 cannot report the PIN policy.
 fn pin_policy(yubikey: &mut YubiKey, slot: SlotId) -> Option<PinPolicy> {
-    piv::metadata(yubikey, slot).ok()?.policy.map(|(pin, _)| pin)
+    piv::metadata(yubikey, slot)
+        .ok()?
+        .policy
+        .map(|(pin, _)| slot_pin_policy(slot, pin))
+}
+
+/// Replace `PinPolicy::Default` with the default PIN policy of `slot`.
+///
+/// NIST SP 800-73-5 Part 1 sets the access rule for each key:
+/// 9a "PIN" (§3.1.3), 9c "PIN Always" (§3.2.1), 9d "PIN" (§3.2.2), retired
+/// key management keys "PIN" (§3.3.4) and 9e "Always" (§3.1.4).
+/// <https://doi.org/10.6028/NIST.SP.800-73pt1-5>
+///
+/// Yubico maps these to `Always` for 9c, `Never` for 9e and `Once` for the
+/// other slots. YubiKey FIPS 5.7.1 and later use `Once` for 9e, so its
+/// default stays unresolved.
+/// <https://docs.yubico.com/yesdk/users-manual/application-piv/pin-touch-policies.html>
+fn slot_pin_policy(slot: SlotId, policy: PinPolicy) -> PinPolicy {
+    match (policy, slot) {
+        (PinPolicy::Default, SlotId::Signature) => PinPolicy::Always,
+        (
+            PinPolicy::Default,
+            SlotId::Authentication | SlotId::KeyManagement | SlotId::Retired(_),
+        ) => PinPolicy::Once,
+        (policy, _) => policy,
+    }
 }
 
 /// The card returns the same error when it needs a PIN or times out.
