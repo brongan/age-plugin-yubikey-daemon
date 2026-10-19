@@ -227,11 +227,5 @@ fn kdf_wrong_recipient_pk_fails() {
     let mut ss = [0u8; 32];
     ss.copy_from_slice(shared_secret.raw_secret_bytes().as_slice());
     let wrong_pk = p256::SecretKey::random(&mut rand::thread_rng()).public_key();
-    assert!(
-        parsed
-            .derive_file_key(&ss, &wrong_pk)
-            .is_err()
-    );
+    assert!(parsed.derive_file_key(&ss, &wrong_pk).is_err());
 }
-
-

@@ -26,7 +26,6 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, oneshot};
 use tokio_serde::formats::Bincode;
-use zeroize::Zeroizing;
 use yubikey::Certificate;
 use yubikey::Context;
 use yubikey::PinPolicy;
@@ -37,6 +36,7 @@ use yubikey::piv::AlgorithmId;
 use yubikey::piv::RetiredSlotId;
 use yubikey::piv::SlotId;
 use yubikey::piv::decrypt_data;
+use zeroize::Zeroizing;
 
 fn open_first_yubikey() -> yubikey::Result<Option<YubiKey>> {
     Context::open()?
@@ -468,8 +468,14 @@ fn yubikey_worker(rx: &mut Receiver<WorkerRequest>) {
             } => {
                 let result = match &mut session {
                     Some(s) => {
-                        let r =
-                            handle_ecdh(s, serial, slot, tag, ephemeral_pubkey, pin.map(Zeroizing::new));
+                        let r = handle_ecdh(
+                            s,
+                            serial,
+                            slot,
+                            tag,
+                            ephemeral_pubkey,
+                            pin.map(Zeroizing::new),
+                        );
                         if matches!(&r, Err(EcdhError::Disconnected)) {
                             warn!("YubiKey disconnected; dropping handle");
                             session = None;
@@ -545,9 +551,7 @@ impl protocol::YubikeyAgent for Server {
         {
             return ProbeKeyResult::WorkerExited;
         }
-        reply_rx
-            .await
-            .unwrap_or(ProbeKeyResult::WorkerDropped)
+        reply_rx.await.unwrap_or(ProbeKeyResult::WorkerDropped)
     }
 
     async fn ecdh(
@@ -575,9 +579,7 @@ impl protocol::YubikeyAgent for Server {
         {
             return Err(EcdhError::Disconnected);
         }
-        reply_rx
-            .await
-            .unwrap_or(Err(EcdhError::Disconnected))
+        reply_rx.await.unwrap_or(Err(EcdhError::Disconnected))
     }
 }
 

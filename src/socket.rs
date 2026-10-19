@@ -62,9 +62,7 @@ pub fn bind(socket_path: &Path) -> io::Result<UnixListener> {
 /// Take a systemd-activated Unix listener via `listenfd`. `index` is the
 /// position of the socket's `ListenStream=` line in the socket unit.
 pub fn from_systemd(fds: &mut ListenFd, index: usize) -> io::Result<Option<UnixListener>> {
-    let std_listener = fds
-        .take_unix_listener(index)
-        .map_err(io::Error::other)?;
+    let std_listener = fds.take_unix_listener(index).map_err(io::Error::other)?;
     std_listener
         .map(|l| {
             l.set_nonblocking(true)?;
