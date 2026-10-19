@@ -217,7 +217,8 @@ fn handle_slot_key(session: &mut Session, slot: SlotId) -> Result<KeyData, SignE
 
 /// Sign `message` with the RSA 2048 key in `slot` using PKCS#1 v1.5 and
 /// SHA-256. If the card says the slot needs a PIN, ask with pinentry and try
-/// again.
+/// again. If the card refuses when no PIN is needed, or after the PIN is
+/// verified, the touch timed out.
 fn handle_sign(session: &mut Session, slot: SlotId, message: &[u8]) -> Result<Vec<u8>, SignError> {
     let cert = read_cert(&mut session.yubikey, slot)?;
     let sign = |yubikey: &mut YubiKey| {
@@ -225,16 +226,21 @@ fn handle_sign(session: &mut Session, slot: SlotId, message: &[u8]) -> Result<Ve
         sign_with_card(yubikey, slot, &cert, message)
     };
     match sign(&mut session.yubikey) {
-        Err(SignError::AuthenticationRequired) => {
-            let policy = pin_policy(&mut session.yubikey, slot);
-            if !needs_pin(policy, session.pin_verified) {
-                return Err(SignError::TouchTimeout);
-            }
+        Err(SignError::AuthenticationRequired)
+            if needs_pin(pin_policy(&mut session.yubikey, slot), session.pin_verified) =>
+        {
             prompt_and_verify_pin(session, slot.into())?;
             sign(&mut session.yubikey)
         }
         result => result,
     }
+    .map_err(|e| match e {
+        SignError::AuthenticationRequired => {
+            touch_timeout_notice(slot);
+            SignError::TouchTimeout
+        }
+        e => e,
+    })
 }
 
 /// How long a signature may take before the card is assumed to wait for a
@@ -269,6 +275,27 @@ fn touch_reminder(slot: SlotId) -> std_mpsc::Sender<()> {
         }
     });
     done
+}
+
+/// Tell the user that signing failed because the YubiKey was not touched in
+/// time. The D-Bus call runs on its own thread, so a hung notification server
+/// cannot block the YubiKey worker.
+fn touch_timeout_notice(slot: SlotId) {
+    thread::spawn(move || {
+        let body = format!(
+            "The YubiKey was not touched in time to sign with PIV slot {:02x}. \
+             Sign again and touch the YubiKey when it blinks.",
+            u8::from(slot)
+        );
+        if let Err(e) = Notification::new()
+            .summary("YubiKey signing failed")
+            .body(&body)
+            .timeout(Timeout::Never)
+            .show()
+        {
+            warn!("Could not show touch timeout notice: {e}");
+        }
+    });
 }
 
 /// Firmware before 5.3 cannot report the PIN policy.
