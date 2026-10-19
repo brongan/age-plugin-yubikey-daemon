@@ -72,27 +72,42 @@ impl Session {
     }
 
     /// Verify `pin` on the card and mark this session as verified.
-    fn verify_pin(&mut self, pin: &Zeroizing<String>) -> Result<(), EcdhError> {
+    fn verify_pin(&mut self, pin: &Zeroizing<String>) -> Result<(), PinError> {
         match self.yubikey.verify_pin(pin.as_bytes()) {
             Ok(()) => {
                 info!("PIN verified successfully");
             }
-            Err(e) if is_session_fatal(&e) => return Err(EcdhError::Disconnected),
-            Err(yubikey::Error::WrongPin { tries }) => {
-                warn!("Wrong PIN ({tries} tries remaining)");
-                return Err(EcdhError::WrongPin { tries });
-            }
-            Err(yubikey::Error::PinLocked) => {
-                warn!("PIN locked");
-                return Err(EcdhError::PinLocked);
-            }
-            Err(e) => {
-                warn!("PIN verification failed: {e}");
-                return Err(EcdhError::PinRejected);
-            }
+            Err(e) if is_session_fatal(&e) => return Err(PinError::Disconnected),
+            Err(yubikey::Error::WrongPin { tries }) => return Err(PinError::Wrong { tries }),
+            Err(yubikey::Error::PinLocked) => return Err(PinError::Locked),
+            Err(e) => return Err(PinError::Rejected(e)),
         }
         self.pin_verified = true;
         Ok(())
+    }
+}
+
+/// PIN verification errors.
+#[derive(Debug, thiserror::Error)]
+enum PinError {
+    #[error("YubiKey disconnected")]
+    Disconnected,
+    #[error("wrong PIN ({tries} tries remaining)")]
+    Wrong { tries: u8 },
+    #[error("PIN locked")]
+    Locked,
+    #[error("{0}")]
+    Rejected(#[source] yubikey::Error),
+}
+
+impl From<PinError> for EcdhError {
+    fn from(e: PinError) -> Self {
+        match e {
+            PinError::Disconnected => EcdhError::Disconnected,
+            PinError::Wrong { tries } => EcdhError::WrongPin { tries },
+            PinError::Locked => EcdhError::PinLocked,
+            PinError::Rejected(_) => EcdhError::PinRejected,
+        }
     }
 }
 
@@ -104,10 +119,34 @@ pub(crate) enum SignError {
     Disconnected,
     #[error("YubiKey worker stopped")]
     WorkerExited,
-    #[error("could not read certificate from slot 0x{0:02x}")]
-    CertRead(u8),
-    #[error("certificate in slot 0x{0:02x} does not contain an RSA 2048 key")]
-    CertKey(u8),
+    #[error("could not read certificate from slot 0x{slot:02x}: {source}")]
+    CertRead {
+        slot: u8,
+        #[source]
+        source: yubikey::Error,
+    },
+    #[error("certificate in slot 0x{slot:02x} does not contain an RSA key: {source}")]
+    CertNotRsa {
+        slot: u8,
+        #[source]
+        source: rsa::pkcs8::spki::Error,
+    },
+    #[error(
+        "certificate in slot 0x{slot:02x} has an RSA {bits}-bit key; only RSA 2048 is supported"
+    )]
+    CertKeySize { slot: u8, bits: usize },
+    #[error("could not convert the key in slot 0x{slot:02x} to SSH form: {source}")]
+    SshKey {
+        slot: u8,
+        #[source]
+        source: ssh_key::Error,
+    },
+    #[error("YubiKey could not use the certificate key in slot 0x{slot:02x}: {source}")]
+    SignerKey {
+        slot: u8,
+        #[source]
+        source: yubikey::Error,
+    },
     #[error("YubiKey needs a PIN or touch for this signature")]
     AuthenticationRequired,
     #[error("YubiKey was not touched in time")]
@@ -120,14 +159,18 @@ pub(crate) enum SignError {
     PinCancelled,
     #[error("PIN is locked")]
     PinLocked,
-    #[error("could not verify PIN")]
-    PinRejected,
+    #[error("could not verify PIN: {0}")]
+    PinRejected(#[source] yubikey::Error),
     #[error("requested key is not in a slot listed with --sign-slot")]
-    UnknownKey,
+    KeyNotInSignSlots,
     #[error("signature flags 0x{0:x} are unsupported; only rsa-sha2-256 is supported")]
     UnsupportedFlags(u32),
-    #[error("could not sign data")]
-    SignFailed,
+    #[error("YubiKey could not sign: {0}")]
+    Card(#[source] yubikey::Error),
+    #[error("could not decode the signature from the YubiKey")]
+    SignatureFormat,
+    #[error("could not convert the signature to SSH form: {0}")]
+    SshSignature(#[source] ssh_key::Error),
 }
 
 /// Check whether the connected YubiKey has a P-256 key matching the given
@@ -170,7 +213,9 @@ fn handle_ecdh(
 
     if !session.pin_verified {
         let pin = pin.as_ref().ok_or(EcdhError::NeedPin)?;
-        session.verify_pin(pin)?;
+        session
+            .verify_pin(pin)
+            .inspect_err(|e| warn!("PIN verification failed: {e}"))?;
     }
 
     let slot_id = RetiredSlotId::try_from(slot).map_err(|_| EcdhError::InvalidSlot(slot))?;
@@ -203,16 +248,17 @@ fn handle_ecdh(
 
 /// Read the RSA 2048 public key from a PIV slot certificate and convert it to SSH form.
 fn handle_slot_key(session: &mut Session, slot: SlotId) -> Result<KeyData, SignError> {
-    let slot_byte = u8::from(slot);
     let cert = read_cert(&mut session.yubikey, slot)?;
+    let slot = u8::from(slot);
     let key = rsa::RsaPublicKey::try_from(cert.subject_pki())
-        .map_err(|_| SignError::CertKey(slot_byte))?;
-    if key.n().bits() != 2048 {
-        return Err(SignError::CertKey(slot_byte));
+        .map_err(|source| SignError::CertNotRsa { slot, source })?;
+    let bits = key.n().bits();
+    if bits != 2048 {
+        return Err(SignError::CertKeySize { slot, bits });
     }
     ssh_key::public::RsaPublicKey::try_from(&key)
         .map(KeyData::Rsa)
-        .map_err(|_| SignError::CertKey(slot_byte))
+        .map_err(|source| SignError::SshKey { slot, source })
 }
 
 /// Sign `message` with the RSA 2048 key in `slot` using PKCS#1 v1.5 and
@@ -344,8 +390,13 @@ fn sign_with_card(
     cert: &Certificate,
     message: &[u8],
 ) -> Result<Vec<u8>, SignError> {
-    let signer = Signer::<YubiRsa<Rsa2048>>::new(yubikey, slot, cert.subject_pki())
-        .map_err(|_| SignError::CertKey(slot.into()))?;
+    let signer =
+        Signer::<YubiRsa<Rsa2048>>::new(yubikey, slot, cert.subject_pki()).map_err(|source| {
+            SignError::SignerKey {
+                slot: slot.into(),
+                source,
+            }
+        })?;
     let error = match signer.try_sign(message) {
         Ok(signature) => return Ok(signature.to_vec()),
         Err(e) => e,
@@ -356,10 +407,8 @@ fn sign_with_card(
     {
         Some(yubikey::Error::AuthenticationError) => Err(SignError::AuthenticationRequired),
         Some(e) if is_session_fatal(e) => Err(SignError::Disconnected),
-        _ => {
-            warn!("Could not sign data: {error}");
-            Err(SignError::SignFailed)
-        }
+        Some(&e) => Err(SignError::Card(e)),
+        None => Err(SignError::SignatureFormat),
     }
 }
 
@@ -381,12 +430,13 @@ fn prompt_and_verify_pin(session: &mut Session, slot: u8) -> Result<(), SignErro
         };
         match session.verify_pin(&pin) {
             Ok(()) => return Ok(()),
-            Err(EcdhError::WrongPin { tries }) => {
+            Err(PinError::Wrong { tries }) => {
+                warn!("Wrong PIN ({tries} tries remaining)");
                 error = Some(format!("Incorrect PIN; {tries} tries remain"));
             }
-            Err(EcdhError::Disconnected) => return Err(SignError::Disconnected),
-            Err(EcdhError::PinLocked) => return Err(SignError::PinLocked),
-            Err(_) => return Err(SignError::PinRejected),
+            Err(PinError::Disconnected) => return Err(SignError::Disconnected),
+            Err(PinError::Locked) => return Err(SignError::PinLocked),
+            Err(PinError::Rejected(e)) => return Err(SignError::PinRejected(e)),
         }
     }
 }
@@ -395,7 +445,10 @@ fn read_cert(yubikey: &mut YubiKey, slot: SlotId) -> Result<Certificate, SignErr
     match Certificate::read(yubikey, slot) {
         Ok(c) => Ok(c),
         Err(e) if is_session_fatal(&e) => Err(SignError::Disconnected),
-        Err(_) => Err(SignError::CertRead(slot.into())),
+        Err(source) => Err(SignError::CertRead {
+            slot: slot.into(),
+            source,
+        }),
     }
 }
 
@@ -545,7 +598,6 @@ fn with_sign_session<T>(
     };
     let result = op(s);
     if matches!(&result, Err(SignError::Disconnected)) {
-        warn!("YubiKey disconnected; dropping handle");
         *session = None;
     }
     result

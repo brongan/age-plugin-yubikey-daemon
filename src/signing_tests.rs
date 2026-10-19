@@ -102,7 +102,7 @@ async fn refuses_sign_for_key_not_in_allowed_slots() {
         .await;
     drop(agent);
 
-    assert_eq!(result, Err(SignError::UnknownKey));
+    assert_eq!(result, Err(SignError::KeyNotInSignSlots));
     assert!(worker.await.unwrap().is_empty());
 }
 

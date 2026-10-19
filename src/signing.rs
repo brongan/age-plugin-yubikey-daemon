@@ -84,14 +84,14 @@ impl SigningAgent {
             return Err(SignError::UnsupportedFlags(request.flags));
         }
         let PublicCredential::Key(requested) = request.credential else {
-            return Err(SignError::UnknownKey);
+            return Err(SignError::KeyNotInSignSlots);
         };
         let slot = self
             .slot_keys()
             .await?
             .into_iter()
             .find_map(|(slot, key)| (key == requested).then_some(slot))
-            .ok_or(SignError::UnknownKey)?;
+            .ok_or(SignError::KeyNotInSignSlots)?;
 
         let (reply, reply_rx) = oneshot::channel();
         self.request(WorkerRequest::Sign {
@@ -107,7 +107,7 @@ impl SigningAgent {
             },
             signature,
         )
-        .map_err(|_| SignError::SignFailed)
+        .map_err(SignError::SshSignature)
     }
 }
 
