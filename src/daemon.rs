@@ -81,7 +81,7 @@ impl Session {
             Ok(()) => {
                 info!("PIN verified successfully");
             }
-            Err(e) if is_session_fatal(&e) => return Err(PinError::Disconnected),
+            Err(e) if is_session_fatal(&e) => return Err(PinError::Disconnected(e)),
             Err(yubikey::Error::WrongPin { tries }) => return Err(PinError::Wrong { tries }),
             Err(yubikey::Error::PinLocked) => return Err(PinError::Locked),
             Err(e) => return Err(PinError::Rejected(e)),
@@ -94,8 +94,8 @@ impl Session {
 /// PIN verification errors.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum PinError {
-    #[error("YubiKey disconnected")]
-    Disconnected,
+    #[error("YubiKey disconnected: {0}")]
+    Disconnected(#[source] yubikey::Error),
     #[error("wrong PIN ({tries} tries remaining)")]
     Wrong { tries: u8 },
     #[error("PIN is locked")]
@@ -106,14 +106,14 @@ pub(crate) enum PinError {
 
 impl PinError {
     fn is_disconnected(&self) -> bool {
-        matches!(self, PinError::Disconnected)
+        matches!(self, PinError::Disconnected(_))
     }
 }
 
 impl From<PinError> for EcdhError {
     fn from(e: PinError) -> Self {
         match e {
-            PinError::Disconnected => EcdhError::Disconnected,
+            PinError::Disconnected(_) => EcdhError::Disconnected,
             PinError::Wrong { tries } => EcdhError::WrongPin { tries },
             PinError::Locked => EcdhError::PinLocked,
             PinError::Rejected(_) => EcdhError::PinRejected,
@@ -129,6 +129,8 @@ pub(crate) enum DecryptError {
     Wire(#[from] EcdhError),
     #[error(transparent)]
     Pin(#[from] PinError),
+    #[error("YubiKey disconnected: {0}")]
+    Disconnected(#[source] yubikey::Error),
     #[error("could not read certificate from slot 0x{slot:02x}: {source}")]
     CertRead {
         slot: u8,
@@ -152,7 +154,7 @@ pub(crate) enum DecryptError {
 impl DecryptError {
     fn is_disconnected(&self) -> bool {
         match self {
-            DecryptError::Wire(e) => matches!(e, EcdhError::Disconnected),
+            DecryptError::Disconnected(_) => true,
             DecryptError::Pin(e) => e.is_disconnected(),
             _ => false,
         }
@@ -164,6 +166,7 @@ impl From<DecryptError> for EcdhError {
         match e {
             DecryptError::Wire(e) => e,
             DecryptError::Pin(e) => e.into(),
+            DecryptError::Disconnected(_) => EcdhError::Disconnected,
             DecryptError::CertRead { slot, .. } => EcdhError::CertRead(slot),
             DecryptError::CertInvalidKey { slot, .. } => EcdhError::CertInvalidKey(slot),
             DecryptError::EcdhFailed { slot, .. } => EcdhError::EcdhFailed(slot),
@@ -185,8 +188,10 @@ impl From<DecryptError> for ProbeKeyResult {
 /// so the daemon logs these errors.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum SignError {
-    #[error("YubiKey is disconnected")]
-    Disconnected,
+    #[error("no YubiKey is connected")]
+    NotConnected,
+    #[error("YubiKey is disconnected: {0}")]
+    Disconnected(#[source] yubikey::Error),
     #[error("YubiKey worker stopped")]
     WorkerExited,
     #[error("could not read certificate from slot 0x{slot:02x}: {source}")]
@@ -244,7 +249,7 @@ pub(crate) enum SignError {
 impl SignError {
     fn is_disconnected(&self) -> bool {
         match self {
-            SignError::Disconnected => true,
+            SignError::Disconnected(_) => true,
             SignError::Pin(e) => e.is_disconnected(),
             _ => false,
         }
@@ -303,7 +308,7 @@ fn handle_ecdh(
         SlotId::Retired(slot_id),
     ) {
         Ok(buf) => buf,
-        Err(e) if is_session_fatal(&e) => return Err(EcdhError::Disconnected.into()),
+        Err(e) if is_session_fatal(&e) => return Err(DecryptError::Disconnected(e)),
         Err(source) => return Err(DecryptError::EcdhFailed { slot, source }),
     };
     let shared_secret: [u8; 32] =
@@ -480,7 +485,7 @@ fn sign_with_card(
         .and_then(|source| source.downcast_ref::<yubikey::Error>())
     {
         Some(yubikey::Error::AuthenticationError) => Err(SignError::AuthenticationRequired),
-        Some(e) if is_session_fatal(e) => Err(SignError::Disconnected),
+        Some(&e) if is_session_fatal(&e) => Err(SignError::Disconnected(e)),
         Some(&e) => Err(SignError::Card(e)),
         None => Err(SignError::SignatureFormat),
     }
@@ -516,7 +521,7 @@ fn prompt_and_verify_pin(session: &mut Session, slot: u8) -> Result<(), SignErro
 fn read_cert(yubikey: &mut YubiKey, slot: SlotId) -> Result<Certificate, SignError> {
     match Certificate::read(yubikey, slot) {
         Ok(c) => Ok(c),
-        Err(e) if is_session_fatal(&e) => Err(SignError::Disconnected),
+        Err(e) if is_session_fatal(&e) => Err(SignError::Disconnected(e)),
         Err(source) => Err(SignError::CertRead {
             slot: slot.into(),
             source,
@@ -534,7 +539,7 @@ fn read_slot_pubkey(
 ) -> Result<PublicKey, DecryptError> {
     let cert = match Certificate::read(yubikey, SlotId::Retired(slot_id)) {
         Ok(c) => c,
-        Err(e) if is_session_fatal(&e) => return Err(EcdhError::Disconnected.into()),
+        Err(e) if is_session_fatal(&e) => return Err(DecryptError::Disconnected(e)),
         Err(source) => return Err(DecryptError::CertRead { slot, source }),
     };
 
@@ -665,7 +670,7 @@ fn with_sign_session<T>(
     op: impl FnOnce(&mut Session) -> Result<T, SignError>,
 ) -> Result<T, SignError> {
     let Some(s) = session else {
-        return Err(SignError::Disconnected);
+        return Err(SignError::NotConnected);
     };
     let result = op(s);
     if result.as_ref().is_err_and(SignError::is_disconnected) {
