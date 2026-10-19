@@ -120,7 +120,10 @@ impl Agent<Listener> for SigningAgent {
 #[async_trait::async_trait]
 impl Session for SigningAgent {
     async fn request_identities(&mut self) -> Result<Vec<Identity>, AgentError> {
-        let keys = self.slot_keys().await.map_err(AgentError::other)?;
+        let keys = self.slot_keys().await.map_err(|e| {
+            error!("Could not list signing keys: {e}");
+            AgentError::Failure
+        })?;
         Ok(keys
             .into_iter()
             .map(|(slot, key)| Identity {
@@ -131,7 +134,10 @@ impl Session for SigningAgent {
     }
 
     async fn sign(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
-        self.sign_request(request).await.map_err(AgentError::other)
+        self.sign_request(request).await.map_err(|e| {
+            error!("Could not sign: {e}");
+            AgentError::Failure
+        })
     }
 }
 

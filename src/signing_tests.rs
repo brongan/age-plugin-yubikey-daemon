@@ -107,6 +107,15 @@ async fn refuses_sign_for_key_not_in_allowed_slots() {
 }
 
 #[tokio::test]
+async fn refused_sign_replies_with_agent_failure() {
+    let (mut agent, _rx) = agent(&[SlotId::Signature]);
+
+    let result = agent.sign(sign_request(rsa_key(0xAB), 0)).await;
+
+    assert!(matches!(result, Err(AgentError::Failure)));
+}
+
+#[tokio::test]
 async fn signs_with_matching_slot_as_rsa_sha2_256() {
     let (agent, rx) = agent(&[SlotId::Signature]);
     let worker = fake_worker(rx);
