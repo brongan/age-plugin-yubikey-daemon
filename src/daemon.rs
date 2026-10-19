@@ -56,19 +56,23 @@ struct Session {
     pin_verified: bool,
 }
 
+/// Errors from opening the YubiKey.
+#[derive(Debug, thiserror::Error)]
+enum OpenError {
+    #[error("no YubiKey is connected")]
+    NotFound,
+    #[error("could not open the YubiKey: {0}")]
+    Open(#[from] yubikey::Error),
+}
+
 impl Session {
-    fn new() -> Result<Self, EcdhError> {
-        match open_first_yubikey() {
-            Ok(Some(yk)) => {
-                info!("Connected to YubiKey with serial: {}", yk.serial());
-                Ok(Self {
-                    pin_verified: false,
-                    yubikey: yk,
-                })
-            }
-            Ok(None) => Err(EcdhError::Disconnected),
-            Err(_) => Err(EcdhError::ChipUnavailable),
-        }
+    fn new() -> Result<Self, OpenError> {
+        let yubikey = open_first_yubikey()?.ok_or(OpenError::NotFound)?;
+        info!("Connected to YubiKey with serial: {}", yubikey.serial());
+        Ok(Self {
+            pin_verified: false,
+            yubikey,
+        })
     }
 
     /// Verify `pin` on the card and mark this session as verified.

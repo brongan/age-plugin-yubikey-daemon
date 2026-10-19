@@ -59,9 +59,6 @@ pub enum EcdhError {
     #[error("YubiKey PIN required")]
     NeedPin,
 
-    #[error("YubiKey not available")]
-    ChipUnavailable,
-
     #[error("YubiKey disconnected mid-operation")]
     Disconnected,
 
