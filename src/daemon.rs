@@ -92,16 +92,22 @@ impl Session {
 }
 
 /// PIN verification errors.
-#[derive(Debug, thiserror::Error)]
-enum PinError {
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PinError {
     #[error("YubiKey disconnected")]
     Disconnected,
     #[error("wrong PIN ({tries} tries remaining)")]
     Wrong { tries: u8 },
-    #[error("PIN locked")]
+    #[error("PIN is locked")]
     Locked,
-    #[error("{0}")]
+    #[error("could not verify PIN: {0}")]
     Rejected(#[source] yubikey::Error),
+}
+
+impl PinError {
+    fn is_disconnected(&self) -> bool {
+        matches!(self, PinError::Disconnected)
+    }
 }
 
 impl From<PinError> for EcdhError {
@@ -111,6 +117,66 @@ impl From<PinError> for EcdhError {
             PinError::Wrong { tries } => EcdhError::WrongPin { tries },
             PinError::Locked => EcdhError::PinLocked,
             PinError::Rejected(_) => EcdhError::PinRejected,
+        }
+    }
+}
+
+/// Errors from probing keys and ECDH. They keep causes that the wire error
+/// cannot carry. The RPC handler logs them and sends the wire error.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DecryptError {
+    #[error(transparent)]
+    Wire(#[from] EcdhError),
+    #[error(transparent)]
+    Pin(#[from] PinError),
+    #[error("could not read certificate from slot 0x{slot:02x}: {source}")]
+    CertRead {
+        slot: u8,
+        #[source]
+        source: yubikey::Error,
+    },
+    #[error("certificate in slot 0x{slot:02x} has an invalid P-256 key: {source}")]
+    CertInvalidKey {
+        slot: u8,
+        #[source]
+        source: p256::pkcs8::spki::Error,
+    },
+    #[error("ECDH with slot 0x{slot:02x} failed: {source}")]
+    EcdhFailed {
+        slot: u8,
+        #[source]
+        source: yubikey::Error,
+    },
+}
+
+impl DecryptError {
+    fn is_disconnected(&self) -> bool {
+        match self {
+            DecryptError::Wire(e) => matches!(e, EcdhError::Disconnected),
+            DecryptError::Pin(e) => e.is_disconnected(),
+            _ => false,
+        }
+    }
+}
+
+impl From<DecryptError> for EcdhError {
+    fn from(e: DecryptError) -> Self {
+        match e {
+            DecryptError::Wire(e) => e,
+            DecryptError::Pin(e) => e.into(),
+            DecryptError::CertRead { slot, .. } => EcdhError::CertRead(slot),
+            DecryptError::CertInvalidKey { slot, .. } => EcdhError::CertInvalidKey(slot),
+            DecryptError::EcdhFailed { slot, .. } => EcdhError::EcdhFailed(slot),
+        }
+    }
+}
+
+impl From<DecryptError> for ProbeKeyResult {
+    fn from(e: DecryptError) -> Self {
+        if e.is_disconnected() {
+            ProbeKeyResult::Disconnected
+        } else {
+            ProbeKeyResult::SlotCheck(e.into())
         }
     }
 }
@@ -161,10 +227,8 @@ pub(crate) enum SignError {
     Pinentry(String),
     #[error("PIN entry was cancelled")]
     PinCancelled,
-    #[error("PIN is locked")]
-    PinLocked,
-    #[error("could not verify PIN: {0}")]
-    PinRejected(#[source] yubikey::Error),
+    #[error(transparent)]
+    Pin(PinError),
     #[error("requested key is not in a slot listed with --sign-slot")]
     KeyNotInSignSlots,
     #[error("signature flags 0x{0:x} are unsupported; only rsa-sha2-256 is supported")]
@@ -177,6 +241,16 @@ pub(crate) enum SignError {
     SshSignature(#[source] ssh_key::Error),
 }
 
+impl SignError {
+    fn is_disconnected(&self) -> bool {
+        match self {
+            SignError::Disconnected => true,
+            SignError::Pin(e) => e.is_disconnected(),
+            _ => false,
+        }
+    }
+}
+
 /// Check whether the connected YubiKey has a P-256 key matching the given
 /// serial, slot, and tag. No PIN or touch required.
 fn handle_probe_key(
@@ -184,19 +258,15 @@ fn handle_probe_key(
     serial: u32,
     slot: u8,
     tag: [u8; TAG_BYTES],
-) -> ProbeKeyResult {
+) -> Result<ProbeKeyResult, DecryptError> {
     if u32::from(session.yubikey.serial()) != serial {
-        return ProbeKeyResult::SerialMismatch;
+        return Ok(ProbeKeyResult::SerialMismatch);
     }
-    let slot_id = match RetiredSlotId::try_from(slot) {
-        Ok(s) => s,
-        Err(_) => return ProbeKeyResult::InvalidSlot(slot),
+    let Ok(slot_id) = RetiredSlotId::try_from(slot) else {
+        return Ok(ProbeKeyResult::InvalidSlot(slot));
     };
-    match read_slot_pubkey(&mut session.yubikey, slot_id, slot, tag) {
-        Ok(_) => ProbeKeyResult::Match,
-        Err(EcdhError::Disconnected) => ProbeKeyResult::Disconnected,
-        Err(e) => ProbeKeyResult::SlotCheck(e),
-    }
+    read_slot_pubkey(&mut session.yubikey, slot_id, slot, tag)?;
+    Ok(ProbeKeyResult::Match)
 }
 
 /// Compute a P-256 ECDH shared secret on the YubiKey hardware: the card
@@ -210,18 +280,16 @@ fn handle_ecdh(
     tag: [u8; TAG_BYTES],
     ephemeral_pubkey: PublicKey,
     pin: Option<Zeroizing<String>>,
-) -> EcdhResult {
+) -> Result<EcdhResponse, DecryptError> {
     if u32::from(session.yubikey.serial()) != serial {
-        return Err(EcdhError::SerialMismatch);
+        return Err(EcdhError::SerialMismatch.into());
     }
 
     if !session.pin_verified {
         let Some(pin) = pin.as_ref() else {
             return Ok(EcdhResponse::NeedPin);
         };
-        session
-            .verify_pin(pin)
-            .inspect_err(|e| warn!("PIN verification failed: {e}"))?;
+        session.verify_pin(pin)?;
     }
 
     let slot_id = RetiredSlotId::try_from(slot).map_err(|_| EcdhError::InvalidSlot(slot))?;
@@ -235,8 +303,8 @@ fn handle_ecdh(
         SlotId::Retired(slot_id),
     ) {
         Ok(buf) => buf,
-        Err(e) if is_session_fatal(&e) => return Err(EcdhError::Disconnected),
-        Err(_) => return Err(EcdhError::EcdhFailed),
+        Err(e) if is_session_fatal(&e) => return Err(EcdhError::Disconnected.into()),
+        Err(source) => return Err(DecryptError::EcdhFailed { slot, source }),
     };
     let shared_secret: [u8; 32] =
         raw_secret
@@ -440,9 +508,7 @@ fn prompt_and_verify_pin(session: &mut Session, slot: u8) -> Result<(), SignErro
                 warn!("Wrong PIN ({tries} tries remaining)");
                 error = Some(format!("Incorrect PIN; {tries} tries remain"));
             }
-            Err(PinError::Disconnected) => return Err(SignError::Disconnected),
-            Err(PinError::Locked) => return Err(SignError::PinLocked),
-            Err(PinError::Rejected(e)) => return Err(SignError::PinRejected(e)),
+            Err(e) => return Err(SignError::Pin(e)),
         }
     }
 }
@@ -465,23 +531,24 @@ fn read_slot_pubkey(
     slot_id: RetiredSlotId,
     slot: u8,
     expected_tag: [u8; TAG_BYTES],
-) -> Result<PublicKey, EcdhError> {
+) -> Result<PublicKey, DecryptError> {
     let cert = match Certificate::read(yubikey, SlotId::Retired(slot_id)) {
         Ok(c) => c,
-        Err(e) if is_session_fatal(&e) => return Err(EcdhError::Disconnected),
-        Err(_) => return Err(EcdhError::CertRead(slot)),
+        Err(e) if is_session_fatal(&e) => return Err(EcdhError::Disconnected.into()),
+        Err(source) => return Err(DecryptError::CertRead { slot, source }),
     };
 
     let spki = cert.subject_pki();
     if spki.algorithm.parameters_oid().ok() != Some(NistP256::OID) {
-        return Err(EcdhError::CertNotP256(slot));
+        return Err(EcdhError::CertNotP256(slot).into());
     }
-    let pk = PublicKey::try_from(spki).map_err(|_| EcdhError::CertInvalidKey)?;
+    let pk = PublicKey::try_from(spki)
+        .map_err(|source| DecryptError::CertInvalidKey { slot, source })?;
     let hash = Sha256::digest(pk.to_encoded_point(true).as_bytes());
     let computed_tag: [u8; TAG_BYTES] = hash[..TAG_BYTES].try_into().unwrap();
 
     if computed_tag != expected_tag {
-        return Err(EcdhError::TagMismatch { slot });
+        return Err(EcdhError::TagMismatch { slot }.into());
     }
 
     Ok(pk)
@@ -492,7 +559,7 @@ pub(crate) enum WorkerRequest {
         serial: u32,
         slot: u8,
         tag: [u8; TAG_BYTES],
-        reply: oneshot::Sender<ProbeKeyResult>,
+        reply: oneshot::Sender<Result<ProbeKeyResult, DecryptError>>,
     },
     Ecdh {
         serial: u32,
@@ -500,7 +567,7 @@ pub(crate) enum WorkerRequest {
         tag: [u8; TAG_BYTES],
         ephemeral_pubkey: PublicKey,
         pin: Option<String>,
-        reply: oneshot::Sender<EcdhResult>,
+        reply: oneshot::Sender<Result<EcdhResponse, DecryptError>>,
     },
     SlotKey {
         slot: SlotId,
@@ -532,13 +599,12 @@ fn yubikey_worker(rx: &mut Receiver<WorkerRequest>) {
                 let result = match &mut session {
                     Some(s) => {
                         let result = handle_probe_key(s, serial, slot, tag);
-                        if matches!(&result, ProbeKeyResult::Disconnected) {
-                            warn!("YubiKey disconnected; dropping handle");
+                        if result.as_ref().is_err_and(DecryptError::is_disconnected) {
                             session = None;
                         }
                         result
                     }
-                    None => ProbeKeyResult::ChipUnavailable,
+                    None => Ok(ProbeKeyResult::ChipUnavailable),
                 };
                 if reply.send(result).is_err() {
                     error!("Failed to send yubikey worker result to daemon.");
@@ -562,13 +628,12 @@ fn yubikey_worker(rx: &mut Receiver<WorkerRequest>) {
                             ephemeral_pubkey,
                             pin.map(Zeroizing::new),
                         );
-                        if matches!(&r, Err(EcdhError::Disconnected)) {
-                            warn!("YubiKey disconnected; dropping handle");
+                        if r.as_ref().is_err_and(DecryptError::is_disconnected) {
                             session = None;
                         }
                         r
                     }
-                    None => Err(EcdhError::Disconnected),
+                    None => Err(EcdhError::Disconnected.into()),
                 };
                 if reply.send(result).is_err() {
                     error!("Failed to send yubikey worker result to daemon.");
@@ -603,7 +668,7 @@ fn with_sign_session<T>(
         return Err(SignError::Disconnected);
     };
     let result = op(s);
-    if matches!(&result, Err(SignError::Disconnected)) {
+    if result.as_ref().is_err_and(SignError::is_disconnected) {
         *session = None;
     }
     result
@@ -636,7 +701,13 @@ impl protocol::YubikeyAgent for Server {
         {
             return ProbeKeyResult::WorkerExited;
         }
-        reply_rx.await.unwrap_or(ProbeKeyResult::WorkerDropped)
+        reply_rx
+            .await
+            .unwrap_or(Ok(ProbeKeyResult::WorkerDropped))
+            .unwrap_or_else(|e| {
+                warn!("Key probe failed: {e}");
+                e.into()
+            })
     }
 
     async fn ecdh(
@@ -664,7 +735,11 @@ impl protocol::YubikeyAgent for Server {
         {
             return Err(EcdhError::Disconnected);
         }
-        reply_rx.await.unwrap_or(Err(EcdhError::Disconnected))
+        reply_rx
+            .await
+            .unwrap_or(Err(EcdhError::Disconnected.into()))
+            .inspect_err(|e| warn!("ECDH failed: {e}"))
+            .map_err(EcdhError::from)
     }
 }
 

@@ -83,14 +83,14 @@ pub enum EcdhError {
     #[error("certificate in slot 0x{0:02x} is not a P-256 key")]
     CertNotP256(u8),
 
-    #[error("invalid P-256 public key in certificate")]
-    CertInvalidKey,
+    #[error("certificate in slot 0x{0:02x} has an invalid P-256 key")]
+    CertInvalidKey(u8),
 
     #[error("tag mismatch in slot 0x{slot:02x}")]
     TagMismatch { slot: u8 },
 
-    #[error("ECDH operation failed")]
-    EcdhFailed,
+    #[error("ECDH with slot 0x{0:02x} failed")]
+    EcdhFailed(u8),
 
     #[error("shared secret has wrong length (expected 32, got {got})")]
     SharedSecretLength { got: usize },
