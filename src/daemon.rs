@@ -216,7 +216,9 @@ fn handle_ecdh(
     }
 
     if !session.pin_verified {
-        let pin = pin.as_ref().ok_or(EcdhError::NeedPin)?;
+        let Some(pin) = pin.as_ref() else {
+            return Ok(EcdhResponse::NeedPin);
+        };
         session
             .verify_pin(pin)
             .inspect_err(|e| warn!("PIN verification failed: {e}"))?;
@@ -244,7 +246,7 @@ fn handle_ecdh(
                 got: raw_secret.len(),
             })?;
 
-    Ok(EcdhResponse {
+    Ok(EcdhResponse::Secret {
         shared_secret,
         recipient_pubkey,
     })

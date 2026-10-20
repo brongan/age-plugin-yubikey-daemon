@@ -49,16 +49,16 @@ pub enum ProbeKeyResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EcdhResponse {
-    pub shared_secret: [u8; 32],
-    pub recipient_pubkey: p256::PublicKey,
+pub enum EcdhResponse {
+    Secret {
+        shared_secret: [u8; 32],
+        recipient_pubkey: p256::PublicKey,
+    },
+    NeedPin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum EcdhError {
-    #[error("YubiKey PIN required")]
-    NeedPin,
-
     #[error("YubiKey disconnected mid-operation")]
     Disconnected,
 

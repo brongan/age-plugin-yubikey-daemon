@@ -5,9 +5,7 @@ use age_core::format::{FileKey, Stanza};
 use age_core::secrecy::ExposeSecret;
 use age_plugin::identity::{self, IdentityPluginV1};
 use age_plugin::{Callbacks, PluginHandler};
-use age_plugin_yubikey_daemon::protocol::{
-    EcdhError, EcdhResponse, ProbeKeyResult, YubikeyAgentClient,
-};
+use age_plugin_yubikey_daemon::protocol::{EcdhResponse, ProbeKeyResult, YubikeyAgentClient};
 use age_plugin_yubikey_daemon::socket;
 use age_plugin_yubikey_daemon::stanza::{IdentityStub, PivP256Stanza};
 use log::{debug, warn};
@@ -173,7 +171,7 @@ async fn process_candidate(
         }
     };
 
-    if matches!(&result, Err(EcdhError::NeedPin)) {
+    if matches!(&result, Ok(EcdhResponse::NeedPin)) {
         let prompt = format!("Enter PIN for YubiKey serial {}", serial);
         if let Ok(secret) = callbacks.request_secret(&prompt)? {
             let pin = secret.expose_secret().to_string();
@@ -198,13 +196,17 @@ async fn process_candidate(
     }
 
     match result {
-        Ok(EcdhResponse {
+        Ok(EcdhResponse::Secret {
             shared_secret,
             recipient_pubkey,
         }) => match parsed.derive_file_key(&shared_secret, &recipient_pubkey) {
             Ok(file_key) => Ok(DecryptResult::Decrypted(file_key)),
             Err(()) => Ok(DecryptResult::AeadFailed),
         },
+        Ok(EcdhResponse::NeedPin) => Ok(DecryptResult::Failed(identity::Error::Identity {
+            index: *identity_index,
+            message: format!("PIN required for YubiKey serial {serial}"),
+        })),
         Err(err) => Ok(DecryptResult::Failed(identity::Error::Identity {
             index: *identity_index,
             message: err.to_string(),

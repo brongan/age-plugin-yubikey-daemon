@@ -8,7 +8,7 @@ use tarpc::server::Channel;
 use tokio_serde::formats::Bincode;
 
 fn mock_pubkey() -> p256::PublicKey {
-    SecretKey::random(&mut rand::thread_rng()).public_key()
+    SecretKey::from_slice(&[1; 32]).unwrap().public_key()
 }
 
 #[derive(Clone)]
@@ -42,9 +42,9 @@ impl YubikeyAgent for MockDaemon {
             return Err(EcdhError::SerialMismatch);
         }
         if pin.as_deref() != Some("654321") {
-            return Err(EcdhError::NeedPin);
+            return Ok(EcdhResponse::NeedPin);
         }
-        Ok(EcdhResponse {
+        Ok(EcdhResponse::Secret {
             shared_secret: [0xCC; 32],
             recipient_pubkey: mock_pubkey(),
         })
@@ -120,7 +120,7 @@ async fn ecdh_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     let res = client1
         .ecdh(context::current(), 12345, 0x82, [0; 4], mock_pubkey(), None)
         .await?;
-    assert!(matches!(res, Err(EcdhError::NeedPin)));
+    assert_eq!(res, Ok(EcdhResponse::NeedPin));
 
     // Second connection
     let (client_stream2, server_stream2) = tokio::io::duplex(1024);
@@ -147,7 +147,13 @@ async fn ecdh_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await??;
 
-    assert_eq!(res2.shared_secret, [0xCC; 32]);
+    assert_eq!(
+        res2,
+        EcdhResponse::Secret {
+            shared_secret: [0xCC; 32],
+            recipient_pubkey: mock_pubkey(),
+        }
+    );
 
     Ok(())
 }
